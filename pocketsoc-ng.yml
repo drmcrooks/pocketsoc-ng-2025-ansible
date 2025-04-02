@@ -63,7 +63,7 @@
 
     - name: Install certificates
       ansible.builtin.git:
-        repo: https://www.github.com/azahmd/pocketsoc-ng-certificates/
+        repo: https://www.github.com/drmcrooks/pocketsoc-ng-certificates/
         dest: /opt/pocketsoc-ng-certificates
 
     - name: docker-compose up certificates
@@ -160,7 +160,7 @@
    
     - name: Pull repository
       git:
-        repo: 'https://github.com/azahmd/pocketsoc-ng'
+        repo: 'https://github.com/drmcrooks/pocketsoc-ng'
         dest: "{{ ansible_env.HOME }}/pocketsoc-ng"
         version: 'main'
         force: yes
@@ -179,7 +179,7 @@
         url: "http://localhost:8081/api/stacks?type=2&method=repository&endpointId={{ environments.json[0].Id }}"
         method: POST
         timeout: 600
-        body: " { \"Name\": \"pocketsoc-ng\", \"RepositoryURL\": \"https://github.com/azahmd/pocketsoc-ng.git\", \"RepositoryReferenceName\": \"refs/heads/main\", \"composeFile\": \"docker-compose.yml\", \"env\": [{\"name\": \"HOST_HOSTNAME\", \"value\": \"{{ ansible_fqdn }}\"},{\"name\": \"OPENSEARCH_INITIAL_ADMIN_PASSWORD\", \"value\": \"{{ openpassword.stdout }}\"},{\"name\": \"MISP_BASEURL\", \"value\": \"{{ haproxy_fqdn }}\"},{\"name\": \"HTTPS_PORT\", \"value\": \"{{ misp_port }}\"},{\"name\": \"USER_HOME\", \"value\": \"{{ ansible_env.HOME }}\"}], \"auto-update\": { \"interval\": \"5m\"} }"
+        body: " { \"Name\": \"pocketsoc-ng\", \"RepositoryURL\": \"https://github.com/drmcrooks/pocketsoc-ng.git\", \"RepositoryReferenceName\": \"refs/heads/main\", \"composeFile\": \"docker-compose.yml\", \"env\": [{\"name\": \"HOST_HOSTNAME\", \"value\": \"{{ ansible_fqdn }}\"},{\"name\": \"OPENSEARCH_INITIAL_ADMIN_PASSWORD\", \"value\": \"{{ openpassword.stdout }}\"},{\"name\": \"MISP_BASEURL\", \"value\": \"{{ haproxy_fqdn }}\"},{\"name\": \"HTTPS_PORT\", \"value\": \"{{ misp_port }}\"},{\"name\": \"USER_HOME\", \"value\": \"{{ ansible_env.HOME }}\"}], \"auto-update\": { \"interval\": \"5m\"} }"
         body_format: json
         headers:
           Content-Type: "application/json"
