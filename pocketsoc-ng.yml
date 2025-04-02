@@ -1,0 +1,296 @@
+---
+- name: install pocketsoc-ng
+  hosts: trainingvms
+  become: true
+  vars_files:
+    - pocketsoc-ng_var.env
+
+  tasks:
+    - name: set sysctl
+      ansible.posix.sysctl:
+        name: vm.max_map_count
+        value: 262144
+        state: present
+        sysctl_set: true
+        reload: true
+
+    - name: Create soc certs directory
+      ansible.builtin.file:
+        path: /etc/ssl/certs/soc
+        state: directory
+
+    - name: Add docker signing key
+      ansible.builtin.rpm_key:
+        key: "https://download.docker.com/linux/centos/gpg"
+        state: present
+
+    - name: Add docker repository into repo.d list
+      ansible.builtin.yum_repository:
+        name: docker
+        description: docker repository
+        baseurl: "https://download.docker.com/linux/centos/9/x86_64/stable"
+        enabled: true
+        gpgcheck: true
+        gpgkey: "https://download.docker.com/linux/centos/gpg"
+
+    - name: Install packages
+      ansible.builtin.yum:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - git
+            #- python-docker-py
+        state: latest
+        update_cache: true
+
+    - name: Install docker-compose
+      get_url:
+        url: https://github.com/docker/compose/releases/download/v2.5.1/docker-compose-linux-x86_64
+        dest: /usr/local/bin/docker-compose
+        mode: 'u+x,g+x'
+
+    - name: Start Docker
+      ansible.builtin.service:
+        name: "docker"
+        enabled: true
+        state: started
+
+    - name: create docker volume for certificate
+      docker_volume:
+        name: certificates
+        state: present
+
+    - name: Install certificates
+      ansible.builtin.git:
+        repo: https://www.github.com/azahmd/pocketsoc-ng-certificates/
+        dest: /opt/pocketsoc-ng-certificates
+
+    - name: docker-compose up certificates
+      command: "/usr/local/bin/docker-compose -f /opt/pocketsoc-ng-certificates/docker-compose.yml up"
+
+    - name: Install portainer
+      ignore_errors: yes
+      shell: docker volume create portainer_data && docker run -d -p 8000:8000 -p 9443:9443 -p 8081:9000 --name portainer --restart=always -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data -v certificates:/certs portainer/portainer-ce:2.20.3 #--sslcert /certs/host-certs/live/{{ ansible_fqdn }}/cert.pem --sslkey /certs/host-certs/live/{{ ansible_fqdn }}/privkey.pem
+
+    - name: debug
+      debug:
+        var: admin_password_command
+
+    - name: build portainer admin password
+      tags:
+        - test
+      shell: "{{ admin_password_command }}"
+      register: adminpassword
+
+    - name: check portainer admin password
+      ansible.builtin.debug:
+        msg: "{{ adminpassword.stdout }}"
+
+    - name: build opensearch admin password
+      tags:
+        - test
+      shell: "{{ admin_password_command }}"
+      register: openpassword
+
+    - name: check opensearch admin password
+      ansible.builtin.debug:
+        msg: "{{ openpassword.stdout }}"
+
+    - name: set portainer admin password
+      # ignore_errors: yes
+      uri:
+        url: http://localhost:8081/api/users/admin/init
+        method: POST
+        body: "{ \"Username\": \"admin\", \"Password\": \"{{ adminpassword.stdout }}\" }"
+        body_format: json
+        headers:
+          Content-Type: "application/json"
+
+    - name: get portainer admin authkey
+      # ignore_errors: yes
+      uri:
+        url: http://localhost:8081/api/auth
+        method: POST
+        body: "{ \"username\": \"admin\", \"password\": \"{{ adminpassword.stdout }}\" }"
+        body_format: json
+        headers:
+          Content-Type: "application/json"
+      register: auth
+
+    - name: write authkey
+      ansible.builtin.debug:
+        msg: "{{ auth.json.jwt }}"
+
+    - name: get environment
+      uri:
+        url: http://localhost:8081/api/endpoints
+        method: GET
+        body_format: json
+        headers:
+          Content-Type: "application/json"
+          Authorization: "{{ auth.json.jwt  }}"
+      register: environments
+
+    - name: Define Endpoints
+      when: environments.json | length == 0
+      shell: |
+        curl --silent --show-error -o - localhost:8081/api/endpoints \
+          -H "Authorization: Bearer {{ auth.json.jwt }}" \
+          -F "Name=local" \
+          -F "URL=unix:///var/run/docker.sock" \
+          -F "EndpointCreationType=1"
+      args:
+        # warn: false
+      register: response
+
+    - name: get environment
+      uri:
+        url: http://localhost:8081/api/endpoints
+        method: GET
+        body_format: json
+        headers:
+          Content-Type: "application/json"
+          Authorization: "{{ auth.json.jwt  }}"
+      register: environments
+
+    - name: check environments
+      ansible.builtin.debug:
+        msg: "{{ environments.json[0].Id }}"
+   
+    - name: Pull repository
+      git:
+        repo: 'https://github.com/azahmd/pocketsoc-ng'
+        dest: "{{ ansible_env.HOME }}/pocketsoc-ng"
+        version: 'main'
+        force: yes
+
+
+    - name: Copy OpenSearch Dashboards template 
+      template:
+        src: templates/opensearch_dashboards.yml.j2
+        dest: "{{ ansible_env.HOME }}/pocketsoc-ng/components/opensearch_dashboards/config/opensearch_dashboards.yml"
+        force: yes
+#      when: inventory_hostname in ['node-1', 'node-2']
+
+    - name: set portainer stacks
+      ignore_errors: yes
+      uri:
+        url: "http://localhost:8081/api/stacks?type=2&method=repository&endpointId={{ environments.json[0].Id }}"
+        method: POST
+        timeout: 600
+        body: " { \"Name\": \"pocketsoc-ng\", \"RepositoryURL\": \"https://github.com/azahmd/pocketsoc-ng.git\", \"RepositoryReferenceName\": \"refs/heads/main\", \"composeFile\": \"docker-compose.yml\", \"env\": [{\"name\": \"HOST_HOSTNAME\", \"value\": \"{{ ansible_fqdn }}\"},{\"name\": \"OPENSEARCH_INITIAL_ADMIN_PASSWORD\", \"value\": \"{{ openpassword.stdout }}\"},{\"name\": \"MISP_BASEURL\", \"value\": \"{{ haproxy_fqdn }}\"},{\"name\": \"HTTPS_PORT\", \"value\": \"{{ misp_port }}\"},{\"name\": \"USER_HOME\", \"value\": \"{{ ansible_env.HOME }}\"}], \"auto-update\": { \"interval\": \"5m\"} }"
+        body_format: json
+        headers:
+          Content-Type: "application/json"
+          Authorization: "{{ auth.json.jwt  }}"
+
+    - name: Wait for opensearch to come up
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 5601
+
+    - name: Wait for opensearch to come up
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 9200
+
+    - name: check containers
+      community.docker.docker_host_info:
+        containers: yes
+      register: result
+
+#    - name: readout container
+#      tags: docker
+#      ansible.builtin.debug:
+#        msg: "{{ result }}"
+
+    - name: Get infos on container
+      community.docker.docker_container_info:
+        name: /opensearch-node1
+      register: result
+
+    - name: Does container exist?
+      ansible.builtin.debug:
+        msg: "The container {{ 'exists' if result.exists else 'does not exist' }}"
+
+    - name: Print information about container
+      ansible.builtin.debug:
+        var: result.container
+      when: result.exists
+
+    - name: make adminpassword.sh executable 
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/pocketsoc-ng/components/opensearch/bin/adminpassword.sh"
+        mode: '0755'
+
+    - name: ensure internal_users.yml is owned by opensearch
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/pocketsoc-ng/components/opensearch/config/internal_users.yml"
+        owner: 1000
+        group: 1000
+        mode: '0664'
+
+    - name: run adminpassword.sh in OpenSearch container
+      community.docker.docker_container_exec:
+        container: opensearch-node1 
+        command: /usr/share/opensearch/bin/adminpassword.sh
+      register: hash_output
+
+    - name: ensure password hash was generated
+      ansible.builtin.debug:
+        msg: "Hash output: {{ hash_output.stdout }}"
+      when: hash_output.rc == 0
+
+    - name: update internal_users.yml with the new password hash
+      ansible.builtin.lineinfile:
+        path: "{{ ansible_env.HOME }}/pocketsoc-ng/components/opensearch/config/internal_users.yml"
+        regexp: '^admin:\n hash:'
+        line: "  hash: '{{ hash_output.stdout }}'"
+      when: hash_output.rc == 0
+
+    - name: update internal_users.yml with the new password hash
+      ansible.builtin.lineinfile:
+        path: "{{ ansible_env.HOME }}/pocketsoc-ng/components/opensearch/config/internal_users.yml"
+        regexp: '^kibanaserver:\n hash:'
+        line: "  hash: '{{ hash_output.stdout }}'"
+      when: hash_output.rc == 0
+
+    - name: Copy root-ca to nodes
+      copy:
+        src: templates/root-ca.pem
+        dest: "/var/lib/docker/volumes/certificates/_data"
+
+    - name: Ensure permission to certificate dir
+      file:
+        path: "/var/lib/docker/volumes/certificates/_data/server.crt"
+        owner: 1000
+        group: 1000
+        mode: '0644'
+
+    - name: Ensure permission to certificate dir
+      file:
+        path: "/var/lib/docker/volumes/certificates/_data/server.key"
+        owner: 1000
+        group: 1000
+        mode: '0644'
+
+    - name: check portainer admin password
+      ansible.builtin.debug:
+        msg: "{{ adminpassword.stdout }}"
+
+    - name: check opensearch admin password
+      ansible.builtin.debug:
+        msg: "{{ openpassword.stdout }}"
+
+
+    - name: apply security settings
+      community.docker.docker_container_exec:
+        container: opensearch-node1
+        command: "/usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+                 -cd /usr/share/opensearch/config/opensearch-security \
+                 -icl \
+                 -key /usr/share/opensearch/config/kirk-key.pem \
+                 -cert /usr/share/opensearch/config/kirk.pem \
+                 -cacert /usr/share/opensearch/config/root-ca.pem \
+                 -nhnv"
